@@ -7,6 +7,8 @@ import java.util.Map;
 
 import org.apache.commons.io.FileUtils;
 
+import gfuzan.hotstart.ClassLoaderFactory.CustomClassLoader;
+
 public class HotStartApplication {
 
     /**
@@ -14,97 +16,61 @@ public class HotStartApplication {
      */
     private static final String[] PROPERTIES = new String[] { "application.properties" };
 
-    /**
-     * 扫描间隔(单位s)
-     */
-    private static final String SCAN_INTERVAL = "ScanInterval";
+    public static void main(String[] args) {
+        ConfigInfo config = new ConfigInfo(PROPERTIES);
 
-    /**
-     * 启动类
-     */
-    private static final String START_CLASS = "StartClass";
-
-    /**
-     * 类路径
-     */
-    private static final String CLASSES_PATH = "ClassesPath";
-
-    /**
-     * jar包路径
-     */
-    private static final String LIB_PATH = "LibPath";
-
-    @SuppressWarnings("deprecation")
-    public static void main(String[] args) throws Exception {
-        Configuration configuration = getConfigurations(PROPERTIES);
-
-        // 获取配置文件内容
-        final int scanInterval = configuration.getInt(SCAN_INTERVAL, 30);
-        final String startClass = configuration.getString(START_CLASS);
-        String[] classesPath = configuration.getStringArray(CLASSES_PATH);
-        String[] libPath = configuration.getStringArray(LIB_PATH);
-
-        // 配置信息校验
-        if (startClass == null || startClass.isEmpty() || classesPath == null || classesPath.length == 0) {
-            throw new NullPointerException("请配置参数: '" + START_CLASS + "','" + CLASSES_PATH + "'");
-        }
-
-        // 初始化文件信息
-        final Map<String, Long> fileInfo = InitFileInfo(classesPath);
-
-        MyRunnable myRunnable = new MyRunnable(getClassLoader(classesPath, libPath));
-        myRunnable.startClass = startClass;
+        MyRunnable myRunnable = new MyRunnable(ClassLoaderFactory.getClassLoader(config.classesPath, config.libPath));
+        myRunnable.startClass = config.startClass;
 
         Thread thread = new Thread(myRunnable);
-        thread.setContextClassLoader(myRunnable.ccl);
+        thread.setContextClassLoader(myRunnable.ccl.getURLClassLoader());
         thread.start();
 
-        // 检测文件变化并重启
-        for (;;) {
-            boolean newLoad = false;
-            for (String key : fileInfo.keySet()) {
-                File file = new File(key);
-                Long time = fileInfo.get(key);
-                if (FileUtils.isFileNewer(file, time)) {
-                    fileInfo.put(key, file.lastModified());
-                    if (!newLoad) {
-                        System.out.println("-----------重新加载----------");
-                        newLoad = true;
-                        // 停止不了运行中的线程
-                        {
-                            thread.interrupt();
-                            thread.stop();
-                        }
-                        myRunnable.ccl.close();
-                        myRunnable.ccl = getClassLoader(classesPath, libPath);
-                        thread = new Thread(myRunnable);
-                        thread.setContextClassLoader(myRunnable.ccl);
-                        thread.start();
-                    }
-                }
-            }
-            newLoad = false;
-            Thread.sleep(scanInterval * 1000);
-        }
-
+        hotStart(thread, myRunnable, config);
     }
 
-    private static CustomClassLoader getClassLoader(String[] classesPaths, String[] libPaths) {
-        CustomClassLoader ccl = new CustomClassLoader();
-        for (String classesPath : classesPaths) {
-            ccl.addURL(new File(classesPath));
-        }
+    /**
+     * 热启动
+     * @param thread 线程
+     * @param myRunnable 
+     * @param config 配置信息
+     */
+    @SuppressWarnings("deprecation")
+    private static void hotStart(Thread thread, MyRunnable myRunnable, ConfigInfo config) {
+        // 初始化文件信息
+        final Map<String, Long> fileInfo = InitFileInfo(config.classesPath);
 
-        for (String libPath : libPaths) {
-            File jarDirectory = new File(libPath);
-            if (jarDirectory.isDirectory()) {
-                Collection<File> listJars = FileUtils.listFiles(new File(libPath), new String[] { "jar" }, true);
-                for (File jar : listJars) {
-                    ccl.addURL(jar);
+        // 检测文件变化并重启
+        try {
+            for (;;) {
+                boolean newLoad = false;
+                for (String key : fileInfo.keySet()) {
+                    File file = new File(key);
+                    Long time = fileInfo.get(key);
+                    if (FileUtils.isFileNewer(file, time)) {
+                        fileInfo.put(key, file.lastModified());
+                        if (!newLoad) {
+                            System.out.println("-----------重新加载----------");
+                            newLoad = true;
+                            // 停止不了运行中的线程
+                            {
+                                thread.interrupt();
+                                thread.stop();
+                            }
+                            myRunnable.ccl.getURLClassLoader().close();
+                            myRunnable.ccl = ClassLoaderFactory.getClassLoader(config.classesPath, config.libPath);
+                            thread = new Thread(myRunnable);
+                            thread.setContextClassLoader(myRunnable.ccl.getURLClassLoader());
+                            thread.start();
+                        }
+                    }
                 }
+                newLoad = false;
+                Thread.sleep(config.scanInterval * 1000);
             }
+        } catch (Exception e) {
+            e.printStackTrace();
         }
-        return ccl;
     }
 
     /**
@@ -127,23 +93,76 @@ public class HotStartApplication {
     }
 
     /**
-     * 获取配置文件
-     * @param file 文件名
-     * @return
+     * 配置信息
+     * @author GFuZan
+     *
      */
-    private static Configuration getConfigurations(String[] files) {
+    private static class ConfigInfo {
 
-        Configuration configurations = new Configuration();
+        /**
+         * 扫描间隔(单位s)
+         */
+        private static final String SCAN_INTERVAL = "ScanInterval";
+        final int scanInterval;
 
-        ClassLoader classLoader = HotStartApplication.class.getClassLoader();
-        for (String file : files) {
-            Configuration properties = Configuration.properties(classLoader.getResource(file));
-            configurations.append(properties);
+        /**
+         * 启动类
+         */
+        private static final String START_CLASS = "StartClass";
+        final String startClass;
+
+        /**
+         * 类路径
+         */
+        private static final String CLASSES_PATH = "ClassesPath";
+        final String[] classesPath;
+
+        /**
+         * jar包路径
+         */
+        private static final String LIB_PATH = "LibPath";
+        final String[] libPath;
+
+        ConfigInfo(String[] files) {
+
+            Configuration configuration = getConfigurations(PROPERTIES);
+
+            // 获取配置文件内容
+            this.scanInterval = configuration.getInt(SCAN_INTERVAL, 30);
+            this.startClass = configuration.getString(START_CLASS);
+            this.classesPath = configuration.getStringArray(CLASSES_PATH);
+            this.libPath = configuration.getStringArray(LIB_PATH);
+
+            // 配置信息校验
+            if (startClass == null || startClass.isEmpty() || classesPath == null || classesPath.length == 0) {
+                throw new NullPointerException("请配置参数: '" + START_CLASS + "','" + CLASSES_PATH + "'");
+            }
         }
 
-        return configurations;
+        /**
+         * 获取配置文件
+         * @param file 文件名
+         * @return
+         */
+        private static Configuration getConfigurations(String[] files) {
+
+            Configuration configurations = new Configuration();
+
+            ClassLoader classLoader = HotStartApplication.class.getClassLoader();
+            for (String file : files) {
+                Configuration properties = Configuration.properties(classLoader.getResource(file));
+                configurations.append(properties);
+            }
+
+            return configurations;
+        }
     }
 
+    /**
+     * 运行接口
+     * @author GFuZan
+     *
+     */
     private static class MyRunnable implements Runnable {
         public CustomClassLoader ccl = null;
         public String startClass = null;
